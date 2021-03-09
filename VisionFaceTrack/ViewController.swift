@@ -8,6 +8,7 @@ Contains the main app implementation using Vision.
 import UIKit
 import AVKit
 import Vision
+import CoreML
 
 class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     
@@ -29,11 +30,17 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     var detectionOverlayLayer: CALayer?
     var detectedFaceRectangleShapeLayer: CAShapeLayer?
     var detectedFaceLandmarksShapeLayer: CAShapeLayer?
+    // Vlad - age detection
+    var detectedAgeLayer: CATextLayer?
     
     // Vision requests
+    // Localization
     private var detectionRequests: [VNDetectFaceRectanglesRequest]?
+    // Tracking
     private var trackingRequests: [VNTrackObjectRequest]?
-    
+    // Age detection - Vlad
+    private var ageRequests: [VNCoreMLRequest]?
+
     lazy var sequenceRequestHandler = VNSequenceRequestHandler()
     
     // MARK: UIViewController overrides
@@ -44,6 +51,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         self.session = self.setupAVCaptureSession()
         
         self.prepareVisionRequest()
+        self.prepareAgeRequest()
         
         self.session?.startRunning()
     }
@@ -62,13 +70,44 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return .portrait
     }
     
+    // MARK: Age Detection
+    
+//    func detectAge(image: CIImage) {
+//
+//                   // Load the model
+//       guard let model = try? VNCoreMLModel(for: AgeNet().model) else {
+//                      fatalError("AgeNet model not found!")
+//                 }
+//                  // Create request for CoreML model created
+//                 let request = VNCoreMLRequest(model: model) { [weak self] request, error in
+//                     guard let results = request.results as? [VNClassificationObservation], let ageResult = results.first else {
+//                           fatalError("Unexpected type!")
+//                     }
+//
+//                  // Assign the result to a previously created label
+//                     DispatchQueue.main.async { [weak self] in
+//                        self?.labelAge.text = "I think your age is \(ageResult.identifier) years!                                   (\(Int(topResult.confidence * 100))% of confidence)"
+//                     }
+//                }
+//
+//                // Run the model classifier on global dispatch queue passing the image as a parameter
+//                let handler = VNImageRequestHandler(ciImage: image)
+//                      DispatchQueue.global(qos: .userInteractive).async {
+//                      do {
+//                          try handler.perform([request])
+//                      } catch {
+//                          print(error)
+//                      }
+//                }
+//        }
+    
     // MARK: AVCapture Setup
     
     /// - Tag: CreateCaptureSession
     fileprivate func setupAVCaptureSession() -> AVCaptureSession? {
         let captureSession = AVCaptureSession()
         do {
-            let inputDevice = try self.configureFrontCamera(for: captureSession)
+            let inputDevice = try self.configureBackCamera(for: captureSession)
             self.configureVideoDataOutput(for: inputDevice.device, resolution: inputDevice.resolution, captureSession: captureSession)
             self.designatePreviewLayer(for: captureSession)
             return captureSession
@@ -87,47 +126,50 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
     fileprivate func highestResolution420Format(for device: AVCaptureDevice) -> (format: AVCaptureDevice.Format, resolution: CGSize)? {
         var highestResolutionFormat: AVCaptureDevice.Format? = nil
         var highestResolutionDimensions = CMVideoDimensions(width: 0, height: 0)
-        
+
         for format in device.formats {
             let deviceFormat = format as AVCaptureDevice.Format
-            
+
             let deviceFormatDescription = deviceFormat.formatDescription
             if CMFormatDescriptionGetMediaSubType(deviceFormatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
                 let candidateDimensions = CMVideoFormatDescriptionGetDimensions(deviceFormatDescription)
+                if (candidateDimensions.height > 1080) {
+                    continue
+                }
                 if (highestResolutionFormat == nil) || (candidateDimensions.width > highestResolutionDimensions.width) {
                     highestResolutionFormat = deviceFormat
                     highestResolutionDimensions = candidateDimensions
                 }
             }
         }
-        
+
         if highestResolutionFormat != nil {
             let resolution = CGSize(width: CGFloat(highestResolutionDimensions.width), height: CGFloat(highestResolutionDimensions.height))
             return (highestResolutionFormat!, resolution)
         }
-        
+
         return nil
     }
     
-    fileprivate func configureFrontCamera(for captureSession: AVCaptureSession) throws -> (device: AVCaptureDevice, resolution: CGSize) {
-        let deviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: .video, position: .front)
-        
+    fileprivate func configureBackCamera(for captureSession: AVCaptureSession) throws -> (device: AVCaptureDevice, resolution: CGSize) {
+        let deviceDiscoverySession = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: .video, position: .back)
+
         if let device = deviceDiscoverySession.devices.first {
             if let deviceInput = try? AVCaptureDeviceInput(device: device) {
                 if captureSession.canAddInput(deviceInput) {
                     captureSession.addInput(deviceInput)
                 }
-                
+
                 if let highestResolution = self.highestResolution420Format(for: device) {
                     try device.lockForConfiguration()
                     device.activeFormat = highestResolution.format
                     device.unlockForConfiguration()
-                    
+
                     return (device, highestResolution.resolution)
                 }
             }
         }
-        
+
         throw NSError(domain: "ViewController", code: 1, userInfo: nil)
     }
     
@@ -228,6 +270,24 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         return exifOrientationForDeviceOrientation(UIDevice.current.orientation)
     }
     
+    // Age stuff below - Vlad
+    fileprivate func prepareAgeRequest() {
+        
+        guard let ageModel = try? VNCoreMLModel(for: AgeNet(configuration: MLModelConfiguration()).model) else{
+             fatalError("Erro acessando modelo")
+        }
+
+        let request = VNCoreMLRequest (model: ageModel){ [weak self] request, error in
+            guard let results = request.results as? [VNClassificationObservation], let gendResult = results.first else {
+                  fatalError("Unexpected type!")
+            }
+            print("Classification results: \(results)")
+        }
+        
+             
+        self.ageRequests = [request]
+}
+    
     // MARK: Performing Vision Requests
     
     /// - Tag: WriteCompletionHandler
@@ -236,19 +296,36 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         //self.trackingRequests = []
         var requests = [VNTrackObjectRequest]()
         
+        
+        // Face detection
         let faceDetectionRequest = VNDetectFaceRectanglesRequest(completionHandler: { (request, error) in
-            
+
             if error != nil {
                 print("FaceDetection error: \(String(describing: error)).")
             }
+            
+            
             
             guard let faceDetectionRequest = request as? VNDetectFaceRectanglesRequest,
                 let results = faceDetectionRequest.results as? [VNFaceObservation] else {
                     return
             }
+            
+            
+            
             DispatchQueue.main.async {
                 // Add the observations to the tracking list
                 for observation in results {
+                    
+                    // Age detection - Vlad
+//                    let request = VNCoreMLRequest(model: ageModel) { request, _ in
+//                            if let classifications =
+//                              request.results as? [VNClassificationObservation] {
+//                              print("Classification results: \(classifications)")
+//                            }
+//                        }
+                    
+                    
                     let faceTrackingRequest = VNTrackObjectRequest(detectedObjectObservation: observation)
                     requests.append(faceTrackingRequest)
                 }
@@ -291,6 +368,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         overlayLayer.bounds = captureDeviceBounds
         overlayLayer.position = CGPoint(x: rootLayer.bounds.midX, y: rootLayer.bounds.midY)
         
+        //bezier curves
         let faceRectangleShapeLayer = CAShapeLayer()
         faceRectangleShapeLayer.name = "RectangleOutlineLayer"
         faceRectangleShapeLayer.bounds = captureDeviceBounds
@@ -365,7 +443,7 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         
         // Scale and mirror the image to ensure upright presentation.
         let affineTransform = CGAffineTransform(rotationAngle: radiansForDegrees(rotation))
-            .scaledBy(x: scaleX, y: -scaleY)
+            .scaledBy(x: -scaleX, y: -scaleY)
         overlayLayer.setAffineTransform(affineTransform)
         
         // Cover entire screen UI.
@@ -452,6 +530,38 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         CATransaction.commit()
     }
     
+//    /// - Tag: DrawAge
+//    // Age requests - Vlad
+//    fileprivate func drawAgeObservations(_ ageObservations: [VNFaceObservation]) {
+//        guard let faceRectangleShapeLayer = self.detectedFaceRectangleShapeLayer,
+//            let faceLandmarksShapeLayer = self.detectedFaceLandmarksShapeLayer
+//            else {
+//            return
+//        }
+//
+//        CATransaction.begin()
+//
+//        CATransaction.setValue(NSNumber(value: true), forKey: kCATransactionDisableActions)
+//
+//        let faceRectanglePath = CGMutablePath()
+//        let faceLandmarksPath = CGMutablePath()
+//
+//        for faceObservation in faceObservations {
+//            self.addIndicators(to: faceRectanglePath,
+//                               faceLandmarksPath: faceLandmarksPath,
+//                               for: faceObservation)
+//        }
+//
+//        faceRectangleShapeLayer.path = faceRectanglePath
+//        faceLandmarksShapeLayer.path = faceLandmarksPath
+//
+//        self.updateLayerGeometry()
+//
+//        CATransaction.commit()
+//    }
+//
+    
+    
     // MARK: AVCaptureVideoDataOutputSampleBufferDelegate
     /// - Tag: PerformRequests
     // Handle delegate method callback on receiving a sample buffer.
@@ -482,13 +592,24 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
                     return
                 }
                 try imageRequestHandler.perform(detectRequests)
+                
             } catch let error as NSError {
                 NSLog("Failed to perform FaceRectangleRequest: %@", error)
             }
             return
         }
         
+        // Age detection - Vlad
+        guard let ageRequests = self.ageRequests else {
+            return
+        }
+
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // Vlad end
+        
         do {
+            // tracking requests
             try self.sequenceRequestHandler.perform(requests,
                                                      on: pixelBuffer,
                                                      orientation: exifOrientation)
@@ -500,13 +621,25 @@ class ViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDele
         var newTrackingRequests = [VNTrackObjectRequest]()
         for trackingRequest in requests {
             
+            
             guard let results = trackingRequest.results else {
                 return
             }
-            
+          
             guard let observation = results[0] as? VNDetectedObjectObservation else {
                 return
             }
+            // Vlad
+            let imageRequestHandler = VNImageRequestHandler(ciImage: image.cropped(to: observation.boundingBox))
+            
+            do {
+                try imageRequestHandler.perform(ageRequests)
+            }
+            catch let error as NSError {
+                NSLog("Failed to perform AgeRequest: %@", error)
+            }
+            
+            // Vlad end
             
             if !trackingRequest.isLastFrame {
                 if observation.confidence > 0.3 {
